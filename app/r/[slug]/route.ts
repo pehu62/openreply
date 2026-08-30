@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { getRequestIp, hashClickIp } from "@/lib/tracking/server";
 
@@ -27,16 +27,32 @@ export async function GET(request: NextRequest, { params }: RedirectRouteProps) 
     return NextResponse.redirect(new URL("/", request.url), { status: 302 });
   }
 
-  await prisma.linkClick.create({
-    data: {
-      workspaceId: trackedLink.workspaceId,
-      automationId: trackedLink.automationId,
-      instagramAccountId: trackedLink.automation.instagramAccountId,
-      trackedLinkId: trackedLink.id,
-      ipHash: hashClickIp(getRequestIp(request)),
-      userAgent: request.headers.get("user-agent"),
-      referrer: request.headers.get("referer"),
-    },
+  // These links are opened inside Instagram's in-app browser, which gives up on
+  // a slow response and shows its own error page instead of following the
+  // redirect — the person taps through and lands nowhere. So the click is
+  // recorded with `after`, once the redirect has already been sent, and a
+  // failure to record it can never cost a visit. Request-derived values are
+  // read here because the request is gone by the time the callback runs.
+  const ipHash = hashClickIp(getRequestIp(request));
+  const userAgent = request.headers.get("user-agent");
+  const referrer = request.headers.get("referer");
+
+  after(async () => {
+    try {
+      await prisma.linkClick.create({
+        data: {
+          workspaceId: trackedLink.workspaceId,
+          automationId: trackedLink.automationId,
+          instagramAccountId: trackedLink.automation.instagramAccountId,
+          trackedLinkId: trackedLink.id,
+          ipHash,
+          userAgent,
+          referrer,
+        },
+      });
+    } catch (error) {
+      console.error(`[tracked-link] failed to record click for ${slug}`, error);
+    }
   });
 
   return NextResponse.redirect(trackedLink.destinationUrl, { status: 302 });
