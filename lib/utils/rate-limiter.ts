@@ -16,7 +16,10 @@
 
 import Redis from "ioredis";
 
-const RATE_LIMIT_MAX = 750; // private replies per hour, per Meta's documented cap
+// Temporarily throttled well below Meta's cap while the account warms back up
+// after a messaging restriction (2026-08-31). Restore to 750 after a few
+// quiet days.
+const RATE_LIMIT_MAX = 50; // private replies per hour
 const RATE_LIMIT_WINDOW = 3600; // 1 hour in seconds
 const REQUEUE_DELAY_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_REQUEUE_ATTEMPTS = 3;
