@@ -262,8 +262,47 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     // already sent but whose public reply never posted (e.g. it hit a rate
     // limit) must still come back so the public reply can be retried.
     if (existingLog?.status === "SKIPPED_PLAN_LIMIT") continue;
+    // A deliberate skip is final: nothing was sent and nothing should be.
+    if (existingLog?.status === "SKIPPED_DEDUP") continue;
     if (alreadyDmd && (alreadyPublicReplied || !automation.publicReplyEnabled)) {
       continue;
+    }
+
+    // One person, one post, one delivery. Someone who comments a second time
+    // on the same media — a thank-you in the thread, a follow-up question —
+    // already has the DM, so replying again would post another public "check
+    // your DMs" and push a duplicate message. Skip the whole leg the first
+    // time this comment is seen, and record it so the polling reconciler
+    // treats the comment as handled instead of re-enqueueing it every sweep.
+    if (!existingLog) {
+      const alreadyServed = await prisma.dmLog.findFirst({
+        where: {
+          automationId: automation.id,
+          commenterId,
+          mediaId,
+          commentId: { not: commentId },
+          status: { in: ["SENT", "PENDING"] },
+        },
+        select: { commentId: true },
+      });
+      if (alreadyServed) {
+        await prisma.dmLog.create({
+          data: {
+            workspaceId: automation.workspaceId,
+            automationId: automation.id,
+            instagramAccountId: automation.instagramAccountId,
+            commenterId,
+            commenterName,
+            commentText,
+            commentId,
+            mediaId,
+            matchedKeyword: matchResult.matchedKeyword,
+            status: "SKIPPED_DEDUP",
+            errorMessage: `Already delivered to this person on this post (comment ${alreadyServed.commentId})`,
+          },
+        });
+        continue;
+      }
     }
 
     if (!automation.instagramAccount.accessToken) {
@@ -282,6 +321,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           commenterName,
           commentText,
           commentId,
+          mediaId,
           matchedKeyword: matchResult.matchedKeyword,
           status: "FAILED",
           errorMessage: "No Instagram access token available",
@@ -313,6 +353,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           commenterName,
           commentText,
           commentId,
+          mediaId,
           matchedKeyword: matchResult.matchedKeyword,
           status: "FAILED",
           errorMessage: "Failed to decrypt Instagram access token",
@@ -338,6 +379,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           commenterName,
           commentText,
           commentId,
+          mediaId,
           matchedKeyword: matchResult.matchedKeyword,
           status: "PENDING",
           attempts: job.attemptsMade + 1,

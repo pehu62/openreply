@@ -227,6 +227,10 @@ model DmLog {
   commenterName String?
   commentText   String
   commentId     String
+  // The post or reel the comment was left on. Lets the worker recognise a
+  // second comment from the same person on the same media and skip it, so a
+  // "thank you" in the thread does not trigger the whole flow again.
+  mediaId       String?
   matchedKeyword String?
   status        DmStatus @default(PENDING)
   attempts      Int      @default(0)
@@ -251,6 +255,7 @@ model DmLog {
   @@index([automationId])
   @@index([instagramAccountId])
   @@index([status])
+  @@index([automationId, commenterId, mediaId])
 }
 
 // Every comment the system has seen, from either the webhook or the polling
