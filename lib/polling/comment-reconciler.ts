@@ -205,14 +205,20 @@ async function sweepCampaign(
     // reply, the completion signal is publicReplySentAt (a DM alone is not
     // enough — the reply still has to land); otherwise a SENT DM is enough. This
     // is what lets a comment whose DM sent but whose public reply failed come
-    // back and retry the reply.
+    // back and retry the reply. A comment the worker deliberately skipped
+    // (SKIPPED_DEDUP — same person, same post, already served) has neither a
+    // DM nor a public reply and never will, so it counts as handled too;
+    // otherwise the sweep would re-enqueue it every pass for the whole window.
     const handled = await prisma.dmLog.findMany({
       where: {
         automationId: automation.id,
         commentId: { in: needsAction.map((c) => c.id) },
-        ...(automation.publicReplyEnabled
-          ? { publicReplySentAt: { not: null } }
-          : { status: "SENT" }),
+        OR: [
+          automation.publicReplyEnabled
+            ? { publicReplySentAt: { not: null } }
+            : { status: "SENT" },
+          { status: "SKIPPED_DEDUP" },
+        ],
       },
       select: { commentId: true },
     });
