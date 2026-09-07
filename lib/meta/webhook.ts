@@ -56,6 +56,9 @@ interface WebhookEntry {
       id?: string;
       comment_id?: string;
       text?: string;
+      // Set when the comment is a reply to another comment (a thread), absent
+      // on top-level comments.
+      parent_id?: string;
       from?: {
         id?: string;
         username?: string;
@@ -143,6 +146,24 @@ export function parseCommentEvents(payload: WebhookPayload): WebhookCommentEvent
       // A private reply to yourself is rejected by Meta, so queueing one
       // only produces a failed log and wasted retries.
       if (commenterId === entry.id) {
+        continue;
+      }
+
+      // Only top-level comments trigger a campaign. A reply inside a thread —
+      // someone answering the automated reply, a thank-you, a side
+      // conversation — is not a request for the resource, and answering it
+      // would drop another public reply and another DM into a thread that has
+      // already been served.
+      if (value.parent_id) {
+        continue;
+      }
+
+      // Only Reels trigger a campaign. Photos and carousels arrive as "FEED";
+      // boosted content arrives as "AD" with no way to tell what was boosted,
+      // so it is excluded too. When Meta omits the field the comment is let
+      // through rather than silently dropped.
+      const mediaProductType = value.media?.media_product_type;
+      if (mediaProductType && mediaProductType !== "REELS") {
         continue;
       }
 

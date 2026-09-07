@@ -151,14 +151,23 @@ async function sweepCampaign(
   }
 
   // Which media this campaign covers: its own post, or the recent feed if it
-  // matches any post.
+  // matches any post. For any-post campaigns only Reels count — photos and
+  // carousels ("FEED") are skipped, matching the webhook filter — so a wider
+  // window is fetched first and then narrowed, otherwise a feed mixing reels
+  // and photos would leave only a few reels covered. A campaign bound to one
+  // specific post is left alone: that post was chosen on purpose.
   const mediaIds: string[] = [];
   if (automation.postId) {
     mediaIds.push(automation.postId);
   } else if (automation.matchAnyPost) {
     try {
-      const media = await getUserMedia(accessToken, RECENT_MEDIA_LIMIT);
-      mediaIds.push(...media.map((m) => m.id));
+      const media = await getUserMedia(accessToken, RECENT_MEDIA_LIMIT * 2);
+      mediaIds.push(
+        ...media
+          .filter((m) => m.media_product_type === "REELS")
+          .slice(0, RECENT_MEDIA_LIMIT)
+          .map((m) => m.id)
+      );
     } catch (error) {
       stat.errors.push(`Media list: ${errMessage(error)}`);
     }
