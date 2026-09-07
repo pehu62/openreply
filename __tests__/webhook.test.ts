@@ -99,7 +99,7 @@ describe("parseCommentEvents", () => {
     });
   });
 
-  it("keeps the organic post id of a comment left on an ad", () => {
+  it("drops a comment left on an ad — only Reels trigger, and an ad's type is unknowable", () => {
     const payload = {
       object: "instagram",
       entry: [
@@ -128,10 +128,110 @@ describe("parseCommentEvents", () => {
       ],
     };
 
+    expect(parseCommentEvents(payload)).toHaveLength(0);
+  });
+
+  it("keeps a top-level comment on a Reel", () => {
+    const payload = {
+      object: "instagram",
+      entry: [
+        {
+          id: "page_123",
+          time: 1234567890,
+          changes: [
+            {
+              field: "comments",
+              value: {
+                id: "comment_456",
+                text: "Link",
+                from: { id: "user_789", username: "testuser" },
+                media: { id: "media_101", media_product_type: "REELS" },
+              },
+            },
+          ],
+        },
+      ],
+    };
+
     const events = parseCommentEvents(payload);
     expect(events).toHaveLength(1);
-    expect(events[0].mediaId).toBe("ad_media_999");
-    expect(events[0].originalMediaId).toBe("media_101");
+    expect(events[0].mediaId).toBe("media_101");
+  });
+
+  it("drops a comment on a photo or carousel (FEED)", () => {
+    const payload = {
+      object: "instagram",
+      entry: [
+        {
+          id: "page_123",
+          time: 1234567890,
+          changes: [
+            {
+              field: "comments",
+              value: {
+                id: "comment_456",
+                text: "Link",
+                from: { id: "user_789", username: "testuser" },
+                media: { id: "media_101", media_product_type: "FEED" },
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(parseCommentEvents(payload)).toHaveLength(0);
+  });
+
+  it("drops a reply inside a thread", () => {
+    const payload = {
+      object: "instagram",
+      entry: [
+        {
+          id: "page_123",
+          time: 1234567890,
+          changes: [
+            {
+              field: "comments",
+              value: {
+                id: "comment_457",
+                parent_id: "comment_456",
+                text: "thank you!",
+                from: { id: "user_789", username: "testuser" },
+                media: { id: "media_101", media_product_type: "REELS" },
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(parseCommentEvents(payload)).toHaveLength(0);
+  });
+
+  it("lets a comment through when Meta omits media_product_type", () => {
+    const payload = {
+      object: "instagram",
+      entry: [
+        {
+          id: "page_123",
+          time: 1234567890,
+          changes: [
+            {
+              field: "comments",
+              value: {
+                id: "comment_456",
+                text: "Link",
+                from: { id: "user_789", username: "testuser" },
+                media: { id: "media_101" },
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(parseCommentEvents(payload)).toHaveLength(1);
   });
 
   it("leaves originalMediaId unset when it repeats the media id", () => {
