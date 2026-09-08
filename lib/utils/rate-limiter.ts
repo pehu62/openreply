@@ -188,6 +188,30 @@ export async function reserveDMSlot(
   };
 }
 
+const RELEASE_DM_SLOT_SCRIPT = `
+local current = tonumber(redis.call("GET", KEYS[1]) or "0")
+if current <= 0 then
+  return 0
+end
+return redis.call("DECR", KEYS[1])
+`;
+
+/**
+ * Give back a slot reserved with reserveDMSlot when the send never happened.
+ *
+ * Meta's 750/hour cap counts private replies that were actually delivered, so
+ * a send it rejected outright (comment deleted, thread gone, user
+ * unreachable) should not eat into the budget — otherwise a run with a high
+ * rejection rate, each rejected job retried a few times, exhausts the counter
+ * in well under an hour while only a handful of DMs went out. Never called
+ * for a Meta rate-limit error: that slot was genuinely spent.
+ */
+export async function releaseDMSlot(instagramAccountId: string): Promise<void> {
+  const client = getRedis();
+  const key = `rate:dm:${instagramAccountId}`;
+  await client.eval(RELEASE_DM_SLOT_SCRIPT, 1, key);
+}
+
 /**
  * Backwards-compatible helper for tests and admin scripts.
  * Prefer reserveDMSlot in workers.
