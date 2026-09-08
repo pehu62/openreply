@@ -281,7 +281,13 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           commenterId,
           mediaId,
           commentId: { not: commentId },
-          status: { in: ["SENT", "PENDING"] },
+          // A DM that failed but whose public reply posted still counts: the
+          // person already has a "check your DMs" under their comment, and a
+          // second one on a later comment is exactly what this guard prevents.
+          OR: [
+            { status: { in: ["SENT", "PENDING"] } },
+            { publicReplySentAt: { not: null } },
+          ],
         },
         select: { commentId: true },
       });

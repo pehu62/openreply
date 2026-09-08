@@ -215,13 +215,18 @@ beforeEach(() => {
   mockPrisma.automation.findFirst.mockResolvedValue(null);
   mockPrisma.dmLog.findUnique.mockResolvedValue(null);
   mockPrisma.dmLog.create.mockResolvedValue({});
-  // Two different lookups share findFirst: the cross-campaign private-reply
-  // check (keyed on status SENT) and the postback's name lookup. Only the
-  // latter should resolve by default, or every comment would look like a
-  // duplicate of an already-answered one.
+  // Three different lookups share findFirst: the cross-campaign private-reply
+  // check (keyed on status SENT), the person/post dedup check (keyed on
+  // commentId: { not }) and the postback's name lookup. Only the last should
+  // resolve by default, or every comment would look like a duplicate of an
+  // already-answered one.
   mockPrisma.dmLog.findFirst.mockImplementation(
-    async (args: { where?: { status?: string } } = {}) =>
-      args.where?.status === "SENT" ? null : { commenterName: "commenter_user" }
+    async (
+      args: { where?: { status?: string; commentId?: { not?: string } } } = {}
+    ) =>
+      args.where?.status === "SENT" || args.where?.commentId?.not !== undefined
+        ? null
+        : { commenterName: "commenter_user" }
   );
   mockPrisma.dmLog.upsert.mockResolvedValue({});
   mockPrisma.dmLog.update.mockResolvedValue({});
@@ -851,10 +856,16 @@ describe("DM Worker — Full Pipeline", () => {
 describe("DM Worker — one private reply per comment", () => {
   it("should skip a campaign when another already used the comment's private reply", async () => {
     mockPrisma.dmLog.findFirst.mockImplementation(
-      async (args: { where?: { status?: string } } = {}) =>
-        args.where?.status === "SENT"
-          ? { automation: { name: "openreply 1" } }
-          : { commenterName: "commenter_user" }
+      async (
+        args: { where?: { status?: string; commentId?: { not?: string } } } = {}
+      ) => {
+        if (args.where?.status === "SENT") {
+          return { automation: { name: "openreply 1" } };
+        }
+        // Person/post dedup lookup: nothing served to this person yet.
+        if (args.where?.commentId?.not !== undefined) return null;
+        return { commenterName: "commenter_user" };
+      }
     );
 
     const processor = getProcessor();
