@@ -12,6 +12,7 @@ const {
   mockDecryptToken,
   mockMatchKeywords,
   mockReserveDMSlot,
+  mockReleaseDMSlot,
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
@@ -45,6 +46,7 @@ const {
   mockDecryptToken: vi.fn(),
   mockMatchKeywords: vi.fn(),
   mockReserveDMSlot: vi.fn(),
+  mockReleaseDMSlot: vi.fn(),
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
@@ -94,6 +96,7 @@ vi.mock("@/lib/utils/keyword-matcher", () => ({
 
 vi.mock("@/lib/utils/rate-limiter", () => ({
   reserveDMSlot: mockReserveDMSlot,
+  releaseDMSlot: mockReleaseDMSlot,
 }));
 
 vi.mock("@/lib/billing/usage", () => ({
@@ -253,6 +256,7 @@ beforeEach(() => {
     reserved: true,
   });
   mockReleaseWorkspaceDMReservation.mockResolvedValue({ count: 1 });
+  mockReleaseDMSlot.mockResolvedValue(undefined);
   mockSendPrivateReply.mockResolvedValue({
     recipient_id: "commenter_999",
     message_id: "msg_001",
@@ -485,6 +489,8 @@ describe("DM Worker — Full Pipeline", () => {
       "workspace_123",
       usagePeriodStart
     );
+    // A rejected send hands its hourly slot back.
+    expect(mockReleaseDMSlot).toHaveBeenCalledWith("ig_456");
     expect(mockPrisma.dmLog.update).toHaveBeenCalledWith({
       where: {
         automationId_commentId: {
