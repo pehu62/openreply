@@ -27,7 +27,7 @@ import {
 } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
-import { reserveDMSlot } from "@/lib/utils/rate-limiter";
+import { releaseDMSlot, reserveDMSlot } from "@/lib/utils/rate-limiter";
 import {
   releaseWorkspaceDMReservation,
   reserveWorkspaceDMSend,
@@ -710,6 +710,16 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         automation.workspaceId,
         usage.periodStart
       );
+      // The private reply never went out, so the hourly slot it reserved is
+      // handed back — unless Meta itself said "rate limited", in which case
+      // the slot is exactly what was consumed.
+      if (rateLimit.reserved && !(error instanceof RateLimitError)) {
+        try {
+          await releaseDMSlot(instagramAccountId);
+        } catch {
+          // Best effort: a slot that stays reserved only costs throughput.
+        }
+      }
 
       await prisma.dmLog.update({
         where: {
