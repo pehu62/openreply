@@ -191,6 +191,12 @@ async function sweepCampaign(
       const authorId = c.from?.id;
       if (!authorId || authorId === account.instagramId) return false;
 
+      // Thread replies never trigger a campaign (same rule as the webhook
+      // filter). Meta returns them from /{media}/comments despite the docs
+      // saying otherwise, and without this check the sweep re-discovers every
+      // reply the webhook route deliberately dropped a few minutes earlier.
+      if (c.parent_id) return false;
+
       const matched = automation.matchAnyWord
         ? true
         : matchKeywords(c.text ?? "", automation.keywords, automation.wholeWordMatch)
@@ -234,9 +240,21 @@ async function sweepCampaign(
     const handledSet = new Set(handled.map((h) => h.commentId));
 
     // Oldest first, so whoever commented earliest gets answered first, capped.
+    // One comment per person per sweep: enqueueing two comments from the same
+    // person together makes the worker process them concurrently, and both
+    // then pass its person/post dedup check before either has written a log.
+    // The later one is left for a following sweep, by which time the first
+    // has a log and the worker skips it.
+    const seenCommenters = new Set<string>();
     const fresh = needsAction
       .filter((c) => !handledSet.has(c.id))
       .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+      .filter((c) => {
+        const author = c.from!.id;
+        if (seenCommenters.has(author)) return false;
+        seenCommenters.add(author);
+        return true;
+      })
       .slice(0, MAX_NEW_PER_SWEEP);
 
     for (const c of fresh) {
