@@ -55,6 +55,13 @@ async function eligible(workspaceId: string, days: number, limit: number) {
       publicReplySentAt: { not: null },
       createdAt: { gte: since },
       automation: { isActive: true },
+      // Only failures that a restriction or a throttle explains. A comment
+      // Meta calls "invalid for a private reply" or a user it "cannot find"
+      // will fail again exactly the same way, and is left alone.
+      OR: [
+        { errorMessage: { contains: "thread owner has archived" } },
+        { errorMessage: { contains: "rate limit" } },
+      ],
     },
     orderBy: { createdAt: "asc" },
     select: {
