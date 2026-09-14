@@ -182,6 +182,10 @@ model Automation {
   // keywords above. Independent of the post trigger — a DM has no media, so
   // postId / matchAnyPost do not apply to it.
   dmTriggerEnabled Boolean @default(false)
+  // Narrow the DM trigger to replies to one of the account's stories. A story
+  // reply arrives as an ordinary inbound DM; this keeps a "reply to my story"
+  // campaign from answering every DM the account receives.
+  storyReplyOnly Boolean @default(false)
   dmMessage      String
   openingDmEnabled     Boolean @default(false)
   openingDmMessage     String?

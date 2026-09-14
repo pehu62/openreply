@@ -86,6 +86,8 @@ interface WebhookEntry {
       is_deleted?: boolean;
       is_unsupported?: boolean;
       attachments?: Array<{ type?: string }>;
+      // Present when the DM is a reply to one of the account's stories.
+      reply_to?: { story?: { id?: string; url?: string } };
     };
   }>;
 }
@@ -95,6 +97,8 @@ export interface WebhookMessageEvent {
   messageId: string;
   messageText: string;
   senderId: string;
+  // Set when the message was sent as a reply to a story: the story's id.
+  storyId?: string;
 }
 
 export interface WebhookPostbackEvent {
@@ -240,12 +244,15 @@ export function parseMessageEvents(
         continue;
       }
 
-      const text = message.text?.trim();
+      const storyId = message.reply_to?.story?.id;
+      // A story reply may carry no text at all (a sticker, an emoji reaction);
+      // it is still a reply to the story, so it is kept with an empty text.
+      const text = message.text?.trim() ?? "";
       const messageId = message.mid;
       const senderId = messaging.sender?.id;
       const accountId = entry.id ?? messaging.recipient?.id;
 
-      if (!text || !messageId || !senderId || !accountId) continue;
+      if ((!text && !storyId) || !messageId || !senderId || !accountId) continue;
       // Ignore anything the connected account sent to itself.
       if (senderId === accountId) continue;
 
@@ -254,6 +261,7 @@ export function parseMessageEvents(
         messageId,
         messageText: text,
         senderId,
+        ...(storyId ? { storyId } : {}),
       });
     }
   }

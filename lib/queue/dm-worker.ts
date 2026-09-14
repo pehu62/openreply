@@ -1002,13 +1002,17 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
  * Dedup is per inbound message id, so each message triggers at most one reply.
  */
 async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
-  const { instagramAccountId, messageId, messageText, senderId } = job.data;
+  const { instagramAccountId, messageId, messageText, senderId, storyId } =
+    job.data;
 
   const automations = await prisma.automation.findMany({
     where: {
       dmTriggerEnabled: true,
       isActive: true,
       instagramAccount: { instagramId: instagramAccountId },
+      // A campaign narrowed to story replies only sees story replies; the
+      // others see every inbound DM, story replies included.
+      ...(storyId ? {} : { storyReplyOnly: false }),
     },
     include: {
       instagramAccount: true,
@@ -1047,7 +1051,8 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
     // of the job must not send a second DM.
     if (
       existingLog?.status === "SENT" ||
-      existingLog?.status === "SKIPPED_PLAN_LIMIT"
+      existingLog?.status === "SKIPPED_PLAN_LIMIT" ||
+      existingLog?.status === "SKIPPED_DEDUP"
     ) {
       continue;
     }
@@ -1059,8 +1064,34 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       commenterId: senderId,
       commentText: messageText,
       commentId: dedupeId,
+      // For a story reply, the story stands in for the media: one delivery per
+      // person per story, however many times they reply to it.
+      mediaId: storyId ?? null,
       matchedKeyword: matchResult.matchedKeyword,
     };
+
+    if (storyId && !existingLog) {
+      const alreadyServed = await prisma.dmLog.findFirst({
+        where: {
+          automationId: automation.id,
+          commenterId: senderId,
+          mediaId: storyId,
+          commentId: { not: dedupeId },
+          status: { in: ["SENT", "PENDING"] },
+        },
+        select: { commentId: true },
+      });
+      if (alreadyServed) {
+        await prisma.dmLog.create({
+          data: {
+            ...logBase,
+            status: "SKIPPED_DEDUP",
+            errorMessage: `Already delivered to this person for this story (${alreadyServed.commentId})`,
+          },
+        });
+        continue;
+      }
+    }
 
     if (!automation.instagramAccount.accessToken) {
       await prisma.dmLog.upsert({

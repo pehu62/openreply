@@ -157,6 +157,7 @@ export async function POST(request: NextRequest) {
           messageId: event.messageId,
           messageText: event.messageText,
           senderId: event.senderId,
+          storyId: event.storyId,
         },
         {
           // Message ids can contain characters BullMQ rejects in a job id (":"
