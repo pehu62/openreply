@@ -64,6 +64,8 @@ export interface ProcessMessageJob {
   messageId: string;
   messageText: string;
   senderId: string;
+  // The story this DM replies to, when it is a story reply.
+  storyId?: string;
 }
 
 export type DmQueueJob =
