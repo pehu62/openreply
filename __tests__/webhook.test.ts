@@ -478,6 +478,49 @@ describe("parseMessageEvents", () => {
     ]);
   });
 
+  it("marks a reply to a story with the story id", () => {
+    const payload = messagingPayload([
+      {
+        sender: { id: "user_999" },
+        recipient: { id: "ig_456" },
+        message: {
+          mid: "mid_story",
+          text: "love this",
+          reply_to: { story: { id: "story_1", url: "https://example/s" } },
+        },
+      },
+    ]);
+
+    expect(parseMessageEvents(payload)).toEqual([
+      {
+        instagramAccountId: "ig_456",
+        messageId: "mid_story",
+        messageText: "love this",
+        senderId: "user_999",
+        storyId: "story_1",
+      },
+    ]);
+  });
+
+  it("keeps a text-less story reply (sticker, reaction) as a story reply", () => {
+    const payload = messagingPayload([
+      {
+        sender: { id: "user_999" },
+        recipient: { id: "ig_456" },
+        message: {
+          mid: "mid_sticker",
+          attachments: [{ type: "share" }],
+          reply_to: { story: { id: "story_1" } },
+        },
+      },
+    ]);
+
+    const events = parseMessageEvents(payload);
+    expect(events).toHaveLength(1);
+    expect(events[0].storyId).toBe("story_1");
+    expect(events[0].messageText).toBe("");
+  });
+
   it("should ignore echoes of the account's own messages", () => {
     const payload = messagingPayload([
       {
