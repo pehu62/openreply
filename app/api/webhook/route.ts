@@ -13,6 +13,23 @@ import { Prisma } from "@/app/generated/prisma/client";
 
 const OPENING_DM_READ_FALLBACK_DELAY_MS = 5 * 60 * 1000;
 
+/**
+ * Live events jump the queue.
+ *
+ * BullMQ consumes its wait list from the tail, and an ordinary add pushes to
+ * the head, which is FIFO. `lifo` pushes to the tail instead, so someone who
+ * commented a moment ago is served before a backlog that can be thousands deep
+ * and days old. That ordering matters more than fairness does here: the reply
+ * is only useful while the person still has the post open, and the send budget
+ * is small enough that whoever is at the front of the queue is effectively who
+ * gets served.
+ *
+ * Requeued jobs and the polling reconciler deliberately keep the default. A
+ * promoted delayed job always lands at the head whatever its options say, so
+ * the catch-up work fills the quiet gaps instead of crowding out live traffic.
+ */
+const SERVE_NEWEST_FIRST = { lifo: true } as const;
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const mode = searchParams.get("hub.mode");
@@ -103,6 +120,7 @@ export async function POST(request: NextRequest) {
           source: "WEBHOOK",
         },
         {
+          ...SERVE_NEWEST_FIRST,
           jobId: `comment_${event.instagramAccountId}_${event.commentId}`,
         }
       );
@@ -130,6 +148,7 @@ export async function POST(request: NextRequest) {
           mid: event.mid,
         },
         {
+          ...SERVE_NEWEST_FIRST,
           // BullMQ forbids ":" in custom job ids, and the payload is
           // "reveal:<id>", so build with underscores and strip any colons.
           jobId: `postback_${event.instagramAccountId}_${event.userId}_${(
@@ -160,6 +179,7 @@ export async function POST(request: NextRequest) {
           storyId: event.storyId,
         },
         {
+          ...SERVE_NEWEST_FIRST,
           // Message ids can contain characters BullMQ rejects in a job id (":"
           // in particular). base64url encodes into exactly the allowed alphabet
           // and stays injective — substituting invalid characters would let two
