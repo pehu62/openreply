@@ -1,8 +1,12 @@
 /**
  * Rate Limiter — Unit Tests
  *
- * Tests the hourly private-reply cap enforcement using mocked Redis.
- * Assertions derive from RATE_LIMIT_MAX so they survive a change to the cap.
+ * Tests private-reply cap enforcement using mocked Redis.
+ * Assertions derive from the exported constants so they survive a change to the
+ * cap, the window or the number of retries a blocked job is given. That matters
+ * more than it sounds: the cap has moved three times, and each move was made
+ * under pressure, when a test failing for an arithmetic reason would have been
+ * one more thing to read past.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -32,7 +36,12 @@ import {
   incrementDMCounter,
   reserveDMSlot,
   RATE_LIMIT_MAX,
+  RATE_LIMIT_WINDOW,
+  MAX_REQUEUE_ATTEMPTS,
 } from "../lib/utils/rate-limiter";
+
+// One below the cap, whatever the cap currently is.
+const UNDER_CAP = RATE_LIMIT_MAX - 1;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -40,13 +49,13 @@ beforeEach(() => {
 
 describe("checkRateLimit", () => {
   it("should allow when count is below limit", async () => {
-    mockGet.mockResolvedValue("50");
+    mockGet.mockResolvedValue(String(UNDER_CAP));
 
     const result = await checkRateLimit("account_123");
 
     expect(result.allowed).toBe(true);
-    expect(result.currentCount).toBe(50);
-    expect(result.remainingDMs).toBe(RATE_LIMIT_MAX - 50);
+    expect(result.currentCount).toBe(UNDER_CAP);
+    expect(result.remainingDMs).toBe(RATE_LIMIT_MAX - UNDER_CAP);
     expect(result.shouldRequeue).toBe(false);
     expect(result.shouldSkip).toBe(false);
     expect(result.reserved).toBe(false);
@@ -75,17 +84,29 @@ describe("checkRateLimit", () => {
   it("should skip after max requeue attempts", async () => {
     mockGet.mockResolvedValue(String(RATE_LIMIT_MAX));
 
-    const result = await checkRateLimit("account_123", 3);
+    const result = await checkRateLimit("account_123", MAX_REQUEUE_ATTEMPTS);
 
     expect(result.allowed).toBe(false);
     expect(result.shouldRequeue).toBe(false);
     expect(result.shouldSkip).toBe(true);
   });
+
+  it("waits much longer than one window before trying again", async () => {
+    // A backlog of thousands all retrying once per window would cost a few
+    // hundred database round-trips a minute to hand out five slots, so the wait
+    // is deliberately several windows long. The quota still fills: far more
+    // jobs wake in that stretch than it can admit.
+    mockGet.mockResolvedValue(String(RATE_LIMIT_MAX));
+
+    const result = await checkRateLimit("account_123");
+
+    expect(result.requeueDelayMs).toBeGreaterThan(RATE_LIMIT_WINDOW * 1000 * 2);
+  });
 });
 
 describe("reserveDMSlot", () => {
-  it("should atomically reserve a slot when below the hourly cap", async () => {
-    mockEval.mockResolvedValue([1, 51, 139]);
+  it("should atomically reserve a slot when below the cap", async () => {
+    mockEval.mockResolvedValue([1, UNDER_CAP, RATE_LIMIT_MAX - UNDER_CAP]);
 
     const result = await reserveDMSlot("account_123");
 
@@ -94,12 +115,12 @@ describe("reserveDMSlot", () => {
       1,
       "rate:dm:account_123",
       RATE_LIMIT_MAX,
-      3600
+      RATE_LIMIT_WINDOW
     );
     expect(result.allowed).toBe(true);
     expect(result.reserved).toBe(true);
-    expect(result.currentCount).toBe(51);
-    expect(result.remainingDMs).toBe(139);
+    expect(result.currentCount).toBe(UNDER_CAP);
+    expect(result.remainingDMs).toBe(RATE_LIMIT_MAX - UNDER_CAP);
   });
 
   it("should recommend requeue when the atomic reserve is denied", async () => {
@@ -116,7 +137,7 @@ describe("reserveDMSlot", () => {
   it("should skip after max requeue attempts", async () => {
     mockEval.mockResolvedValue(["0", String(RATE_LIMIT_MAX), "0"]);
 
-    const result = await reserveDMSlot("account_123", 3);
+    const result = await reserveDMSlot("account_123", MAX_REQUEUE_ATTEMPTS);
 
     expect(result.allowed).toBe(false);
     expect(result.shouldRequeue).toBe(false);
@@ -126,11 +147,11 @@ describe("reserveDMSlot", () => {
 
 describe("incrementDMCounter", () => {
   it("should use the atomic reservation path", async () => {
-    mockEval.mockResolvedValue([1, 51, 139]);
+    mockEval.mockResolvedValue([1, UNDER_CAP, RATE_LIMIT_MAX - UNDER_CAP]);
 
     const count = await incrementDMCounter("account_123");
 
     expect(mockEval).toHaveBeenCalled();
-    expect(count).toBe(51);
+    expect(count).toBe(UNDER_CAP);
   });
 });
