@@ -27,7 +27,11 @@ import {
 } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
-import { releaseDMSlot, reserveDMSlot } from "@/lib/utils/rate-limiter";
+import {
+  checkRateLimit,
+  releaseDMSlot,
+  reserveDMSlot,
+} from "@/lib/utils/rate-limiter";
 import {
   releaseWorkspaceDMReservation,
   reserveWorkspaceDMSend,
@@ -445,6 +449,17 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     // Public reply leg — decoupled from the DM and posted first so a DM failure
     // (e.g. a non-follower whose messaging is restricted) never suppresses it.
     // Idempotent across retries via publicReplySentAt.
+    // A public reply promises a DM. When the hourly budget is already spent —
+    // a backlog draining, a reel taking off — that DM will be requeued or
+    // dropped, and the promise would be empty. Worse, without this check a
+    // queue of several thousand comments posts every one of its public replies
+    // at once, because the reply leg runs before the slot is reserved. Reading
+    // the counter (rather than reserving) keeps the reply leg free while still
+    // bounding it by the send rate.
+    const hasSendHeadroom = needsDm
+      ? (await checkRateLimit(instagramAccountId)).allowed
+      : true;
+
     const replyPool =
       automation.publicReplyMessages.length > 0
         ? automation.publicReplyMessages
@@ -455,6 +470,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       automation.publicReplyEnabled &&
       replyPool.length > 0 &&
       shouldPublicReply(commentId, automation.publicReplyRatePercent) &&
+      hasSendHeadroom &&
       !existingLog?.publicReplySentAt
     ) {
       try {

@@ -13,6 +13,7 @@ const {
   mockMatchKeywords,
   mockReserveDMSlot,
   mockReleaseDMSlot,
+  mockCheckRateLimit,
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
@@ -48,6 +49,7 @@ const {
   mockMatchKeywords: vi.fn(),
   mockReserveDMSlot: vi.fn(),
   mockReleaseDMSlot: vi.fn(),
+  mockCheckRateLimit: vi.fn(),
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
@@ -99,6 +101,7 @@ vi.mock("@/lib/utils/keyword-matcher", () => ({
 vi.mock("@/lib/utils/rate-limiter", () => ({
   reserveDMSlot: mockReserveDMSlot,
   releaseDMSlot: mockReleaseDMSlot,
+  checkRateLimit: mockCheckRateLimit,
 }));
 
 vi.mock("@/lib/billing/usage", () => ({
@@ -261,6 +264,7 @@ beforeEach(() => {
   });
   mockReleaseWorkspaceDMReservation.mockResolvedValue({ count: 1 });
   mockReleaseDMSlot.mockResolvedValue(undefined);
+  mockCheckRateLimit.mockResolvedValue({ allowed: true, currentCount: 0 });
   mockSendPrivateReply.mockResolvedValue({
     recipient_id: "commenter_999",
     message_id: "msg_001",
@@ -907,6 +911,15 @@ describe("DM Worker — sampling the public reply", () => {
 
   it("answers none at 0%", async () => {
     const replied = await runOverAllComments(0);
+    expect(replied).toHaveLength(0);
+  });
+
+  it("stays quiet in public once the hourly send budget is spent", async () => {
+    // The reply leg runs before the slot is reserved, so without this guard a
+    // backlog of thousands would post all of its public replies at once while
+    // the DMs behind them were being requeued.
+    mockCheckRateLimit.mockResolvedValue({ allowed: false, currentCount: 150 });
+    const replied = await runOverAllComments(100);
     expect(replied).toHaveLength(0);
   });
 });
