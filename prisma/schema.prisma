@@ -187,6 +187,10 @@ model Automation {
   // campaign from answering every DM the account receives.
   storyReplyOnly Boolean @default(false)
   dmMessage      String
+  // Alternative wordings of the DM, rotated per recipient. Thousands of
+  // identical private replies read as a bot to Meta's spam systems; the same
+  // message written six ways does not. Empty means "always use dmMessage".
+  dmMessages     String[] @default([])
   openingDmEnabled     Boolean @default(false)
   openingDmMessage     String?
   openingDmButtonLabel String?
@@ -200,6 +204,12 @@ model Automation {
   // 0 sends it right away.
   followUpDelayMinutes Int @default(0)
   publicReplyEnabled Boolean @default(false)
+  // Share of matching comments that get a public reply, 0-100. Answering every
+  // single comment with the same line is the most visible part of an
+  // automation and the part Instagram acts on; replying to a fraction keeps
+  // the comment section looking like a person who drops in now and then. The
+  // draw is deterministic per comment, so a retry never flips the decision.
+  publicReplyRatePercent Int @default(100)
   publicReplyMessage String?
   publicReplyMessages String[] @default([])
   isActive       Boolean @default(true)

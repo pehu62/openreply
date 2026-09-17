@@ -109,8 +109,40 @@ function buildInlineLinkFallback(
   return extraUrls.length > 0 ? `${base}\n${extraUrls.join("\n")}` : base;
 }
 
+/**
+ * Stable 0-99 draw from a string.
+ *
+ * Every per-comment decision below has to survive a retry: a job that runs
+ * twice must reach the same conclusion both times, or a comment skipped on the
+ * first pass would get answered on the second. A hash of the id does that,
+ * where Math.random cannot, and spreads evenly enough across ids to act as a
+ * sample of the traffic.
+ */
+function stableDraw(seed: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % 100;
+}
+
+/** Whether this particular comment is one of the ones that gets a public reply. */
+function shouldPublicReply(commentId: string, ratePercent: number): boolean {
+  if (ratePercent >= 100) return true;
+  if (ratePercent <= 0) return false;
+  return stableDraw(commentId) < ratePercent;
+}
+
+/** Pick one wording out of a pool, the same one every time for a given seed. */
+function pickVariant(pool: string[], fallback: string, seed: string): string {
+  if (pool.length === 0) return fallback;
+  return pool[stableDraw(`v:${seed}`) % pool.length];
+}
+
 type RevealAutomation = {
   dmMessage: string;
+  dmMessages: string[];
   linkButtonLabel: string | null;
   trackedLinks: WorkerTrackedLink[];
   instagramAccount: { instagramId: string };
@@ -128,13 +160,18 @@ async function sendRevealDirectMessage(
   commenterName: string | null,
   context: string
 ): Promise<void> {
+  const dmText = pickVariant(
+    automation.dmMessages,
+    automation.dmMessage,
+    userId
+  );
   if (automation.trackedLinks.length === 0) {
     await sendDirectMessage(
       accessToken,
       automation.instagramAccount.instagramId,
       userId,
       renderMessageWithTracking({
-        message: automation.dmMessage,
+        message: dmText,
         commenterName,
         trackedLinks: automation.trackedLinks,
       })
@@ -145,7 +182,7 @@ async function sendRevealDirectMessage(
   // Try button template first; if Meta rejects it, fall back to inline links.
   const bodyText =
     renderMessageWithoutLink({
-      message: automation.dmMessage,
+      message: dmText,
       commenterName,
     }) || "Here's your link:";
   const buttons = buildLinkButtons(
@@ -176,7 +213,7 @@ async function sendRevealDirectMessage(
         automation.instagramAccount.instagramId,
         userId,
         buildInlineLinkFallback(
-          automation.dmMessage,
+          dmText,
           commenterName,
           automation.trackedLinks,
           bodyText
@@ -417,10 +454,11 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     if (
       automation.publicReplyEnabled &&
       replyPool.length > 0 &&
+      shouldPublicReply(commentId, automation.publicReplyRatePercent) &&
       !existingLog?.publicReplySentAt
     ) {
       try {
-        const chosen = replyPool[Math.floor(Math.random() * replyPool.length)];
+        const chosen = pickVariant(replyPool, replyPool[0], commentId);
         const publicReply = renderMessageWithTracking({
           message: chosen,
           commenterName,
@@ -577,6 +615,14 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       }
     }
 
+    // One wording per person, drawn from the campaign's variants and stable
+    // across retries.
+    const dmText = pickVariant(
+      automation.dmMessages,
+      automation.dmMessage,
+      commenterId
+    );
+
     // With an opening DM, the private reply is a button message; tapping it
     // fires a postback that delivers the reveal (see processPostback). Without
     // one, we send the reveal text directly as today.
@@ -632,7 +678,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         // Try button template first; if Meta rejects it, fall back to inline links.
         const bodyText =
           renderMessageWithoutLink({
-            message: automation.dmMessage,
+            message: dmText,
             commenterName,
           }) || "Here's your link:";
         const buttons = buildLinkButtons(
@@ -659,7 +705,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
             formatError(buttonError)
           );
           const fallbackMessage = buildInlineLinkFallback(
-            automation.dmMessage,
+            dmText,
             commenterName,
             automation.trackedLinks,
             bodyText
@@ -680,7 +726,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         }
       } else {
         const dmMessage = renderMessageWithTracking({
-          message: automation.dmMessage,
+          message: dmText,
           commenterName,
           trackedLinks: automation.trackedLinks,
         });

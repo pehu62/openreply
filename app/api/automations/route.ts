@@ -29,6 +29,7 @@ const createAutomationSchema = z
     dmTriggerEnabled: z.boolean().optional().default(false),
     storyReplyOnly: z.boolean().optional().default(false),
     dmMessage: z.string().min(1).max(1000),
+    dmMessages: z.array(z.string().max(1000)).max(10).optional(),
     openingDmEnabled: z.boolean().optional().default(false),
     openingDmMessage: z.string().max(1000).optional().nullable(),
     openingDmButtonLabel: z.string().max(64).optional().nullable(),
@@ -42,6 +43,7 @@ const createAutomationSchema = z
     // Instagram's messaging window.
     followUpDelayMinutes: z.number().int().min(0).max(1440).optional().default(0),
     publicReplyEnabled: z.boolean().optional().default(false),
+    publicReplyRatePercent: z.number().int().min(0).max(100).optional().default(100),
     publicReplyMessage: z.string().max(1000).optional().nullable(),
     publicReplyMessages: z
       .array(z.string().max(1000))
@@ -98,6 +100,7 @@ const updateAutomationSchema = z.object({
   dmTriggerEnabled: z.boolean().optional(),
   storyReplyOnly: z.boolean().optional(),
   dmMessage: z.string().min(1).max(1000).optional(),
+  dmMessages: z.array(z.string().max(1000)).max(10).optional(),
   openingDmEnabled: z.boolean().optional(),
   openingDmMessage: z.string().max(1000).optional().nullable(),
   openingDmButtonLabel: z.string().max(64).optional().nullable(),
@@ -109,6 +112,7 @@ const updateAutomationSchema = z.object({
   followUpMessage: z.string().max(1000).optional().nullable(),
   followUpDelayMinutes: z.number().int().min(0).max(1440).optional(),
   publicReplyEnabled: z.boolean().optional(),
+  publicReplyRatePercent: z.number().int().min(0).max(100).optional(),
   publicReplyMessage: z.string().max(1000).optional().nullable(),
   publicReplyMessages: z.array(z.string().max(1000)).max(10).optional(),
   isActive: z.boolean().optional(),
@@ -405,6 +409,9 @@ export async function POST(request: NextRequest) {
       storyReplyOnly:
         parsed.data.dmTriggerEnabled && parsed.data.storyReplyOnly,
       dmMessage: parsed.data.dmMessage,
+      dmMessages: (parsed.data.dmMessages ?? [])
+        .map((m) => m.trim())
+        .filter(Boolean),
       openingDmEnabled,
       openingDmMessage: openingDmEnabled
         ? parsed.data.openingDmMessage || null
@@ -428,6 +435,7 @@ export async function POST(request: NextRequest) {
         ? parsed.data.followUpDelayMinutes
         : 0,
       publicReplyEnabled: parsed.data.publicReplyEnabled,
+      publicReplyRatePercent: parsed.data.publicReplyRatePercent,
       publicReplyMessages: parsed.data.publicReplyEnabled
         ? publicReplyList
         : [],
@@ -531,6 +539,13 @@ export async function PATCH(request: NextRequest) {
   if (automationData.matchAnyPost === true || automationData.pendingNextReel === true) {
     automationData.postId = null;
     automationData.postUrl = null;
+  }
+  // The first DM variant is also the fallback single message, so the two stay
+  // consistent for anything that reads dmMessage alone.
+  if (automationData.dmMessages !== undefined) {
+    const list = automationData.dmMessages.map((m) => m.trim()).filter(Boolean);
+    automationData.dmMessages = list;
+    if (list.length > 0) automationData.dmMessage = list[0];
   }
   // Keep the public-reply variations list and the legacy single field in sync.
   if (automationData.publicReplyMessages !== undefined) {

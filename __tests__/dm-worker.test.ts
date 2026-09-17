@@ -16,6 +16,7 @@ const {
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
+  mockSendCommentReply,
 } = vi.hoisted(() => ({
   mockPrisma: {
     automation: {
@@ -50,6 +51,7 @@ const {
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
+  mockSendCommentReply: vi.fn(),
 }));
 
 vi.mock("@/lib/db/client", () => ({
@@ -64,7 +66,7 @@ vi.mock("@/lib/meta/client", () => ({
   sendDirectMessageWithButton: mockSendDirectMessageWithButton,
   sendDirectMessage: mockSendDirectMessage,
   sendDirectMessageWithLinkButton: mockSendDirectMessageWithLinkButton,
-  sendCommentReply: vi.fn(),
+  sendCommentReply: mockSendCommentReply,
   MetaApiError: class MetaApiError extends Error {
     code: number;
     constructor(
@@ -142,6 +144,7 @@ const mockAutomation = {
   postId: "media_101",
   keywords: ["LINK", "PRICE"],
   dmMessage: "Hey {username}! Here is the link: https://example.com",
+  dmMessages: [],
   isActive: true,
   wholeWordMatch: true,
   matchAnyPost: false,
@@ -151,6 +154,7 @@ const mockAutomation = {
   openingDmButtonLabel: null,
   linkButtonLabel: null,
   publicReplyEnabled: false,
+  publicReplyRatePercent: 100,
   publicReplyMessage: null,
   publicReplyMessages: [],
   instagramAccount: {
@@ -856,6 +860,88 @@ describe("DM Worker — Full Pipeline", () => {
         update: expect.objectContaining({ status: "FAILED" }),
       })
     );
+  });
+});
+
+describe("DM Worker — sampling the public reply", () => {
+  const COMMENT_IDS = Array.from({ length: 200 }, (_, i) => `comment_${i}`);
+
+  function runOverAllComments(ratePercent: number) {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      {
+        ...mockAutomation,
+        publicReplyEnabled: true,
+        publicReplyRatePercent: ratePercent,
+        publicReplyMessages: ["check your dms", "sent, what is your top 5?"],
+      },
+    ]);
+    const processor = getProcessor();
+    return COMMENT_IDS.reduce<Promise<string[]>>(async (acc, commentId) => {
+      const replied = await acc;
+      mockSendCommentReply.mockClear();
+      await processor(
+        createMockJob({ ...mockJobData, commentId, commenterId: commentId })
+      );
+      if (mockSendCommentReply.mock.calls.length > 0) replied.push(commentId);
+      return replied;
+    }, Promise.resolve([]));
+  }
+
+  it("replies publicly to a fraction of comments, the same fraction every run", async () => {
+    const firstPass = await runOverAllComments(10);
+
+    // A tenth of the traffic, give or take the spread of a 200-comment sample.
+    expect(firstPass.length).toBeGreaterThan(5);
+    expect(firstPass.length).toBeLessThan(40);
+
+    // And it is the same comments next time: a retry must not turn a comment
+    // that was passed over into one that gets answered.
+    const secondPass = await runOverAllComments(10);
+    expect(secondPass).toEqual(firstPass);
+  });
+
+  it("still answers every comment at 100%", async () => {
+    const replied = await runOverAllComments(100);
+    expect(replied).toHaveLength(COMMENT_IDS.length);
+  });
+
+  it("answers none at 0%", async () => {
+    const replied = await runOverAllComments(0);
+    expect(replied).toHaveLength(0);
+  });
+});
+
+describe("DM Worker — rotating the DM wording", () => {
+  it("keeps one wording per person and spreads wordings across people", async () => {
+    const variants = [
+      "here it is, one",
+      "here it is, two",
+      "here it is, three",
+    ];
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...mockAutomation, dmMessages: variants },
+    ]);
+    const processor = getProcessor();
+
+    const sentTo = async (commenterId: string) => {
+      mockSendPrivateReply.mockClear();
+      await processor(
+        createMockJob({
+          ...mockJobData,
+          commentId: `c_${commenterId}`,
+          commenterId,
+        })
+      );
+      return mockSendPrivateReply.mock.calls[0]?.[3] as string;
+    };
+
+    // Same person, twice: the wording cannot change under them.
+    expect(await sentTo("person_a")).toBe(await sentTo("person_a"));
+
+    const across = new Set<string>();
+    for (let i = 0; i < 30; i += 1) across.add(await sentTo(`person_${i}`));
+    expect(across.size).toBeGreaterThan(1);
+    for (const text of across) expect(variants).toContain(text);
   });
 });
 
