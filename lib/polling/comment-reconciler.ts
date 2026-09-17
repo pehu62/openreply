@@ -215,23 +215,25 @@ async function sweepCampaign(
     });
     if (needsAction.length === 0) continue;
 
-    // Second guard against races: skip comments this campaign has already fully
-    // handled. "Fully handled" depends on the campaign: if it posts a public
-    // reply, the completion signal is publicReplySentAt (a DM alone is not
-    // enough — the reply still has to land); otherwise a SENT DM is enough. This
-    // is what lets a comment whose DM sent but whose public reply failed come
-    // back and retry the reply. A comment the worker deliberately skipped
-    // (SKIPPED_DEDUP — same person, same post, already served) has neither a
-    // DM nor a public reply and never will, so it counts as handled too;
-    // otherwise the sweep would re-enqueue it every pass for the whole window.
+    // Second guard against races: skip comments this campaign has already
+    // finished with. A comment is finished when its public reply went out, or
+    // when the DM went out and the reply leg raised no error — which covers
+    // both "this campaign posts no public replies" and "this comment was not
+    // one of the ones sampled for a reply". Only a reply that genuinely failed
+    // (publicReplyError set) brings an already-sent comment back for another
+    // try. A comment the worker deliberately skipped (SKIPPED_DEDUP — same
+    // person, same post, already served) will never get either leg, so it
+    // counts as finished too; otherwise the sweep would re-enqueue it every
+    // pass for the whole window. Anything else — failed, rate-limited, never
+    // reached — is left out on purpose, so each sweep brings it back until it
+    // lands. That is what drains a backlog gradually instead of at once.
     const handled = await prisma.dmLog.findMany({
       where: {
         automationId: automation.id,
         commentId: { in: needsAction.map((c) => c.id) },
         OR: [
-          automation.publicReplyEnabled
-            ? { publicReplySentAt: { not: null } }
-            : { status: "SENT" },
+          { publicReplySentAt: { not: null } },
+          { status: "SENT", publicReplyError: null },
           { status: "SKIPPED_DEDUP" },
         ],
       },
