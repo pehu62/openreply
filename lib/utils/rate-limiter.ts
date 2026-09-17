@@ -3,28 +3,38 @@
  *
  * Redis-based rate limiter for Instagram private replies.
  *
- * The cap matches Meta's documented limit for this exact call: 750 private
- * replies per hour per Instagram professional account, for comments on posts
- * and reels. Exceeding it risks 429s and app-level restrictions, so the worker
- * requeues rather than pushing through.
+ * Meta documents 750 private replies per hour per Instagram professional
+ * account for comments on posts and reels. Exceeding it risks 429s and
+ * app-level restrictions, so the worker requeues rather than pushing through.
  * https://developers.facebook.com/docs/graph-api/overview/rate-limiting/
  *
- * Note this is a hard ceiling with no headroom. If Meta throttles before the
- * documented limit, or other calls on the same account share the bucket, lower
- * this value.
+ * The budget here is far below that ceiling, and it is counted over a short
+ * window rather than a long one. Both choices come from the same lesson: what
+ * gets an account restricted is not only how many DMs go out in an hour but how
+ * they are grouped. An hourly bucket of 150 is spent in the first three minutes
+ * and then silent for fifty-seven, which is a machine's shape. The same 150 an
+ * hour, metered a few at a time, is a person working through their comments.
  */
 
 import Redis from "ioredis";
 
-// Meta documents 750 private replies per hour per account, but that ceiling is
-// what the API accepts, not what the account survives: three restrictions in
-// three weeks all followed days spent near it. 150/h is still ~3,600 a day —
-// well above a normal day here — and it flattens the burst that follows a reel
-// taking off, which is when the account looks least human.
-const RATE_LIMIT_MAX = 150; // private replies per hour
-const RATE_LIMIT_WINDOW = 3600; // 1 hour in seconds
-const REQUEUE_DELAY_MS = 30 * 60 * 1000; // 30 minutes
-const MAX_REQUEUE_ATTEMPTS = 3;
+// Five sends per two minutes is 150 an hour, the same budget as before, spread
+// instead of spent at once. Three restrictions in three weeks all followed days
+// near Meta's documented ceiling, so the budget stays well under it; the short
+// window is what keeps a backlog or a reel taking off from turning that budget
+// into a single burst.
+const RATE_LIMIT_MAX = 5; // private replies per window
+const RATE_LIMIT_WINDOW = 120; // 2 minutes in seconds
+// A blocked job waits far longer than one window before trying again. With a
+// backlog of thousands, waking every job every window would put a few hundred
+// database round-trips a minute behind a quota that only admits five, and the
+// quota fills either way: the jobs that wake in any ten-minute stretch are
+// already many times what it can take.
+const REQUEUE_DELAY_MS = 10 * 60 * 1000; // 10 minutes
+// Long enough to carry a job through roughly three hours of congestion. Past
+// that it is dropped and the polling reconciler re-discovers it, which is the
+// slower path back into the queue but costs nothing while it waits.
+const MAX_REQUEUE_ATTEMPTS = 18;
 
 let redis: Redis | null = null;
 
@@ -100,7 +110,7 @@ function blockedResult(
 /**
  * Check if an Instagram account is within its DM rate limit.
  *
- * Uses a Redis counter with a 1-hour TTL per account.
+ * Uses a Redis counter per account, expiring with the window.
  * Key pattern: `rate:dm:{instagramAccountId}`
  *
  * @param instagramAccountId - The Instagram account ID to check
@@ -157,7 +167,9 @@ export async function checkRateLimit(
 /**
  * Atomically reserve a DM send slot for an Instagram account.
  * This is the worker-safe path; it prevents concurrent jobs from all passing
- * the rate-limit check before any of them increments the Redis counter.
+ * the rate-limit check before any of them increments the Redis counter. With a
+ * window of a couple of minutes and five slots in it, that race is no longer a
+ * corner case: five concurrent jobs can exhaust a window between them.
  */
 export async function reserveDMSlot(
   instagramAccountId: string,
