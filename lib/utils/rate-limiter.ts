@@ -16,7 +16,12 @@
 
 import Redis from "ioredis";
 
-const RATE_LIMIT_MAX = 750; // private replies per hour, per Meta's documented cap
+// Meta documents 750 private replies per hour per account, but that ceiling is
+// what the API accepts, not what the account survives: three restrictions in
+// three weeks all followed days spent near it. 150/h is still ~3,600 a day —
+// well above a normal day here — and it flattens the burst that follows a reel
+// taking off, which is when the account looks least human.
+const RATE_LIMIT_MAX = 150; // private replies per hour
 const RATE_LIMIT_WINDOW = 3600; // 1 hour in seconds
 const REQUEUE_DELAY_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_REQUEUE_ATTEMPTS = 3;
