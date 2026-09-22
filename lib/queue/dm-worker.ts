@@ -644,8 +644,18 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     // one, we send the reveal text directly as today.
     const useOpeningDm =
       automation.openingDmEnabled &&
+      !automation.openingDmAwaitsReply &&
       Boolean(automation.openingDmMessage) &&
       Boolean(automation.openingDmButtonLabel);
+
+    // Question-first opening: a plain question, no button, no link. Meta lets a
+    // private reply be followed by a second message only once the person
+    // answers, so the link is owed until they do (see deliverOwedLink).
+    const askFirst =
+      automation.openingDmEnabled &&
+      automation.openingDmAwaitsReply &&
+      (automation.openingDmMessages.length > 0 ||
+        Boolean(automation.openingDmMessage?.trim()));
 
     // Follow-gating: the link is revealed only after a follow. When an opening
     // DM is enabled it comes FIRST, and its button routes into the follow check
@@ -653,13 +663,25 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     // status at comment time: confirmed followers get the link now, everyone
     // else gets the "follow me first" prompt (re-verified on tap).
     let sendFollowPrompt = false;
-    if (automation.requireFollow && !useOpeningDm) {
+    if (automation.requireFollow && !useOpeningDm && !askFirst) {
       const alreadyFollows = await getUserFollowStatus(accessToken, commenterId);
       sendFollowPrompt = alreadyFollows !== true;
     }
 
     try {
-      if (useOpeningDm) {
+      if (askFirst) {
+        const question = pickVariant(
+          automation.openingDmMessages,
+          automation.openingDmMessage ?? "",
+          commenterId
+        );
+        await sendPrivateReply(
+          accessToken,
+          automation.instagramAccount.instagramId,
+          commentId,
+          renderMessageWithoutLink({ message: question, commenterName })
+        );
+      } else if (useOpeningDm) {
         const openingText = renderMessageWithTracking({
           message: automation.openingDmMessage as string,
           commenterName,
@@ -765,6 +787,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           status: "SENT",
           dmSentAt: new Date(),
           errorMessage: null,
+          awaitingReply: askFirst,
         },
       });
     } catch (error) {
@@ -1055,6 +1078,168 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
   }
 }
 
+// How long a question-first opening keeps its link on offer. An answer a week
+// later still gets it; beyond that, a DM from the same person is almost
+// certainly about something else, and a link out of nowhere would be odd.
+const OWED_LINK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Send the link owed to someone who was asked a question first.
+ *
+ * With a question-first campaign the private reply asks which list the person
+ * is after and carries no link. Meta allows nothing more after a private reply
+ * until the person writes back, so their answer, whatever it says, is what
+ * releases the link. Every question still pending for that person on the same
+ * campaign is settled by the one answer: one link, not one per reel they
+ * commented on.
+ *
+ * The claim is a single conditional update (awaitingReply true to false), so
+ * two messages sent in quick succession cannot both trigger the link. If the
+ * send fails, the claim is put back and the job retries.
+ *
+ * Returns the campaigns that were served, so the keyword trigger does not
+ * answer the same message a second time.
+ */
+async function deliverOwedLink(
+  instagramAccountId: string,
+  senderId: string
+): Promise<Set<string>> {
+  const served = new Set<string>();
+
+  const owed = await prisma.dmLog.findMany({
+    where: {
+      commenterId: senderId,
+      awaitingReply: true,
+      dmSentAt: { gte: new Date(Date.now() - OWED_LINK_WINDOW_MS) },
+      automation: {
+        isActive: true,
+        openingDmAwaitsReply: true,
+        instagramAccount: { instagramId: instagramAccountId },
+      },
+    },
+    orderBy: { dmSentAt: "desc" },
+    select: { id: true, automationId: true, commenterName: true },
+  });
+  if (owed.length === 0) return served;
+
+  const byAutomation = new Map<string, typeof owed>();
+  for (const log of owed) {
+    const list = byAutomation.get(log.automationId) ?? [];
+    list.push(log);
+    byAutomation.set(log.automationId, list);
+  }
+
+  for (const [automationId, logs] of byAutomation) {
+    const ids = logs.map((l) => l.id);
+    const claimed = await prisma.dmLog.updateMany({
+      where: { id: { in: ids }, awaitingReply: true },
+      data: { awaitingReply: false },
+    });
+    if (claimed.count === 0) continue;
+    served.add(automationId);
+
+    const automation = await prisma.automation.findFirst({
+      where: { id: automationId, isActive: true },
+      include: {
+        instagramAccount: true,
+        workspace: true,
+        trackedLinks: {
+          select: { slug: true, label: true, destinationUrl: true },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+    if (!automation?.instagramAccount.accessToken) continue;
+
+    let accessToken: string;
+    try {
+      accessToken = decryptToken(automation.instagramAccount.accessToken);
+    } catch {
+      continue;
+    }
+
+    const commenterName = logs[0].commenterName ?? null;
+    const dedupeId = `reveal:${senderId}`;
+    const usage = await reserveWorkspaceDMSend(automation.workspaceId);
+    if (!usage.allowed) {
+      await prisma.dmLog.updateMany({
+        where: { id: { in: ids } },
+        data: { awaitingReply: true },
+      });
+      continue;
+    }
+
+    try {
+      await sendRevealDirectMessage(
+        accessToken,
+        automation,
+        senderId,
+        commenterName,
+        "reply"
+      );
+      // The answer opened a 24-hour window, which is what makes a later
+      // follow-up possible at all, so it rides on the same rule as a button tap.
+      if (automation.followUpEnabled && automation.followUpMessage?.trim()) {
+        const delayMs =
+          Math.max(0, automation.followUpDelayMinutes ?? 0) * 60_000;
+        await getDMQueue().add(
+          FOLLOWUP_JOB_NAME,
+          {
+            instagramAccountId: automation.instagramAccount.instagramId,
+            userId: senderId,
+            automationId: automation.id,
+            commenterName,
+          },
+          { delay: delayMs, jobId: `followup_${automation.id}_${senderId}` }
+        );
+      }
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: { automationId: automation.id, commentId: dedupeId },
+        },
+        create: {
+          workspaceId: automation.workspaceId,
+          automationId: automation.id,
+          instagramAccountId: automation.instagramAccountId,
+          commenterId: senderId,
+          commenterName,
+          commentText: "(answered the opening question)",
+          commentId: dedupeId,
+          status: "SENT",
+          dmSentAt: new Date(),
+        },
+        update: { status: "SENT", dmSentAt: new Date(), errorMessage: null },
+      });
+    } catch (error) {
+      await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
+      await prisma.dmLog.updateMany({
+        where: { id: { in: ids } },
+        data: { awaitingReply: true },
+      });
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: { automationId: automation.id, commentId: dedupeId },
+        },
+        create: {
+          workspaceId: automation.workspaceId,
+          automationId: automation.id,
+          instagramAccountId: automation.instagramAccountId,
+          commenterId: senderId,
+          commenterName,
+          commentText: "(answered the opening question)",
+          commentId: dedupeId,
+          status: "FAILED",
+          errorMessage: formatError(error),
+        },
+        update: { status: "FAILED", errorMessage: formatError(error) },
+      });
+      throw error;
+    }
+  }
+
+  return served;
+}
+
 /**
  * Reply to an inbound DM whose text matches a campaign's keywords.
  *
@@ -1066,6 +1251,8 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
 async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   const { instagramAccountId, messageId, messageText, senderId, storyId } =
     job.data;
+
+  const alreadyAnswered = await deliverOwedLink(instagramAccountId, senderId);
 
   const automations = await prisma.automation.findMany({
     where: {
@@ -1090,6 +1277,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   const dedupeId = `dm:${messageId}`;
 
   for (const automation of automations) {
+    if (alreadyAnswered.has(automation.id)) continue;
     const matchResult = automation.matchAnyWord
       ? { matched: true, matchedKeyword: null }
       : matchKeywords(
