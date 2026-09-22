@@ -27,8 +27,10 @@ const {
     dmLog: {
       findUnique: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       create: vi.fn(),
     },
     instagramAccount: {
@@ -155,6 +157,8 @@ const mockAutomation = {
   openingDmEnabled: false,
   openingDmMessage: null,
   openingDmButtonLabel: null,
+  openingDmAwaitsReply: false,
+  openingDmMessages: [],
   linkButtonLabel: null,
   publicReplyEnabled: false,
   publicReplyRatePercent: 100,
@@ -240,6 +244,10 @@ beforeEach(() => {
   );
   mockPrisma.dmLog.upsert.mockResolvedValue({});
   mockPrisma.dmLog.update.mockResolvedValue({});
+  // No question is owed by default, so inbound DMs go straight to the keyword
+  // trigger as they always have.
+  mockPrisma.dmLog.findMany.mockResolvedValue([]);
+  mockPrisma.dmLog.updateMany.mockResolvedValue({ count: 0 });
   mockPrisma.instagramAccount.findUnique.mockResolvedValue({
     workspaceId: "workspace_123",
   });
@@ -1228,6 +1236,186 @@ describe("DM Worker — DM keyword trigger", () => {
     expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({ status: "FAILED" }),
+      })
+    );
+  });
+});
+
+describe("DM Worker — question-first opening", () => {
+  const questionAutomation = {
+    ...mockAutomation,
+    matchAnyWord: true,
+    openingDmEnabled: true,
+    openingDmAwaitsReply: true,
+    openingDmMessage: "Which list are you after, {username}?",
+    openingDmMessages: ["Which list are you after, {username}?"],
+    requireFollow: false,
+    followUpEnabled: false,
+    followUpMessage: null,
+    followUpDelayMinutes: 0,
+  };
+
+  function createMockMessageJob(data: Record<string, unknown> = {}) {
+    return {
+      name: "process-message",
+      data: {
+        instagramAccountId: "ig_456",
+        messageId: "mid_answer",
+        messageText: "the ties one",
+        senderId: "commenter_999",
+        ...data,
+      },
+      id: "message_job_q",
+      attemptsMade: 0,
+    };
+  }
+
+  it("asks the question as a plain private reply, with no link and no button", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([questionAutomation]);
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReply).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "comment_555",
+      "Which list are you after, commenter_user?"
+    );
+    expect(mockSendPrivateReplyWithButton).not.toHaveBeenCalled();
+    expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
+  });
+
+  it("marks the link as owed once the question has gone out", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([questionAutomation]);
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "SENT", awaitingReply: true }),
+      })
+    );
+  });
+
+  it("does not mark anything owed on an ordinary campaign", async () => {
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "SENT", awaitingReply: false }),
+      })
+    );
+  });
+
+  it("sends the link when the person answers, whatever the answer says", async () => {
+    mockPrisma.dmLog.findMany.mockResolvedValue([
+      { id: "log_q1", automationId: "auto_789", commenterName: "commenter_user" },
+    ]);
+    mockPrisma.dmLog.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.automation.findFirst.mockResolvedValue(questionAutomation);
+    mockPrisma.automation.findMany.mockResolvedValue([]);
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    // Claimed atomically: only rows still owed can be taken.
+    expect(mockPrisma.dmLog.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ["log_q1"] }, awaitingReply: true },
+      data: { awaitingReply: false },
+    });
+    expect(mockSendDirectMessage).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "commenter_999",
+      "Hey commenter_user! Here is the link: https://example.com"
+    );
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          automationId_commentId: {
+            automationId: "auto_789",
+            commentId: "reveal:commenter_999",
+          },
+        },
+        create: expect.objectContaining({ status: "SENT" }),
+      })
+    );
+  });
+
+  it("sends nothing when the link was already claimed by an earlier message", async () => {
+    mockPrisma.dmLog.findMany.mockResolvedValue([
+      { id: "log_q1", automationId: "auto_789", commenterName: "commenter_user" },
+    ]);
+    // A second message racing the first: the row is no longer owed.
+    mockPrisma.dmLog.updateMany.mockResolvedValue({ count: 0 });
+    mockPrisma.automation.findFirst.mockResolvedValue(questionAutomation);
+    mockPrisma.automation.findMany.mockResolvedValue([]);
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob({ messageId: "mid_second" }));
+
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+    expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+  });
+
+  it("does not answer the same message twice through the keyword trigger", async () => {
+    mockPrisma.dmLog.findMany.mockResolvedValue([
+      { id: "log_q1", automationId: "auto_789", commenterName: "commenter_user" },
+    ]);
+    mockPrisma.dmLog.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.automation.findFirst.mockResolvedValue(questionAutomation);
+    // The same campaign also listens to DMs: it must not fire a second time.
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...questionAutomation, dmTriggerEnabled: true },
+    ]);
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("puts the link back on offer when the send fails, so a retry can deliver it", async () => {
+    mockPrisma.dmLog.findMany.mockResolvedValue([
+      { id: "log_q1", automationId: "auto_789", commenterName: "commenter_user" },
+    ]);
+    mockPrisma.dmLog.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.automation.findFirst.mockResolvedValue(questionAutomation);
+    mockPrisma.automation.findMany.mockResolvedValue([]);
+    mockSendDirectMessage.mockRejectedValue(new Error("temporary failure"));
+
+    const processor = getProcessor();
+    await expect(processor(createMockMessageJob())).rejects.toThrow(
+      "temporary failure"
+    );
+
+    expect(mockPrisma.dmLog.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ["log_q1"] } },
+      data: { awaitingReply: true },
+    });
+    expect(mockReleaseWorkspaceDMReservation).toHaveBeenCalled();
+  });
+
+  it("only looks for questions owed by active question-first campaigns on this account", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([]);
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    expect(mockPrisma.dmLog.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          commenterId: "commenter_999",
+          awaitingReply: true,
+          automation: {
+            isActive: true,
+            openingDmAwaitsReply: true,
+            instagramAccount: { instagramId: "ig_456" },
+          },
+        }),
       })
     );
   });
