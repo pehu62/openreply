@@ -213,6 +213,10 @@ export async function POST(request: NextRequest) {
           automation: {
             isActive: true,
             openingDmEnabled: true,
+            // A question-first opening waits for an answer by design: reading
+            // the question is not answering it, and Meta would refuse a second
+            // message anyway until the person writes back.
+            openingDmAwaitsReply: false,
             instagramAccount: {
               instagramId: event.instagramAccountId,
             },

@@ -194,6 +194,14 @@ model Automation {
   openingDmEnabled     Boolean @default(false)
   openingDmMessage     String?
   openingDmButtonLabel String?
+  // Question-first opening: the private reply is a plain question with no
+  // button and no link, and the link goes out only once the person answers.
+  // An answer is the one thing that lets a second message follow a private
+  // reply at all, and a conversation reads as a person, not a dispenser.
+  openingDmAwaitsReply Boolean  @default(false)
+  // Alternative wordings of the opening question, rotated per recipient for
+  // the same reason as dmMessages. Empty means "always use openingDmMessage".
+  openingDmMessages    String[] @default([])
   linkButtonLabel      String?
   requireFollow           Boolean @default(false)
   followPromptMessage     String?
@@ -257,6 +265,11 @@ model DmLog {
   publicReplySentAt DateTime?
   publicReplyError  String?
 
+  // Set when this comment was answered with a question-first opening and the
+  // link is still owed. The person's next message claims it (true to false in
+  // a single update, so two quick replies cannot both trigger the link).
+  awaitingReply Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -270,6 +283,7 @@ model DmLog {
   @@index([instagramAccountId])
   @@index([status])
   @@index([automationId, commenterId, mediaId])
+  @@index([commenterId, awaitingReply])
 }
 
 // Every comment the system has seen, from either the webhook or the polling
