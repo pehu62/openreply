@@ -33,6 +33,8 @@ const createAutomationSchema = z
     openingDmEnabled: z.boolean().optional().default(false),
     openingDmMessage: z.string().max(1000).optional().nullable(),
     openingDmButtonLabel: z.string().max(64).optional().nullable(),
+    openingDmAwaitsReply: z.boolean().optional().default(false),
+    openingDmMessages: z.array(z.string().max(1000)).max(10).optional(),
     linkButtonLabel: z.string().max(20).optional().nullable(),
     requireFollow: z.boolean().optional().default(false),
     followPromptMessage: z.string().max(1000).optional().nullable(),
@@ -79,14 +81,22 @@ const createAutomationSchema = z
     message: "Add at least one keyword, or match any word",
     path: ["keywords"],
   })
-  // An opening DM needs both a message and a button label.
+  // An opening DM needs a message, and a button label unless it is a
+  // question-first opening, which is answered by typing rather than tapping.
   .refine(
     (d) =>
       !d.openingDmEnabled ||
-      (Boolean(d.openingDmMessage?.trim()) &&
-        Boolean(d.openingDmButtonLabel?.trim())),
+      ((Boolean(d.openingDmMessage?.trim()) ||
+        (d.openingDmMessages ?? []).some((m) => m.trim())) &&
+        (d.openingDmAwaitsReply || Boolean(d.openingDmButtonLabel?.trim()))),
     { message: "Opening DM needs a message and a button label", path: ["openingDmMessage"] }
-  );
+  )
+  // A question-first opening has no button to route through the follow check,
+  // so the two cannot be combined.
+  .refine((d) => !(d.openingDmAwaitsReply && d.requireFollow), {
+    message: "A question-first opening cannot also require a follow",
+    path: ["openingDmAwaitsReply"],
+  });
 
 const updateAutomationSchema = z.object({
   name: z.string().min(1).max(100).optional(),
@@ -104,6 +114,8 @@ const updateAutomationSchema = z.object({
   openingDmEnabled: z.boolean().optional(),
   openingDmMessage: z.string().max(1000).optional().nullable(),
   openingDmButtonLabel: z.string().max(64).optional().nullable(),
+  openingDmAwaitsReply: z.boolean().optional(),
+  openingDmMessages: z.array(z.string().max(1000)).max(10).optional(),
   linkButtonLabel: z.string().max(20).optional().nullable(),
   requireFollow: z.boolean().optional(),
   followPromptMessage: z.string().max(1000).optional().nullable(),
@@ -419,6 +431,10 @@ export async function POST(request: NextRequest) {
       openingDmButtonLabel: openingDmEnabled
         ? parsed.data.openingDmButtonLabel || null
         : null,
+      openingDmAwaitsReply: openingDmEnabled && parsed.data.openingDmAwaitsReply,
+      openingDmMessages: openingDmEnabled
+        ? (parsed.data.openingDmMessages ?? []).map((m) => m.trim()).filter(Boolean)
+        : [],
       linkButtonLabel: parsed.data.linkButtonLabel || null,
       requireFollow: parsed.data.requireFollow,
       followPromptMessage: parsed.data.requireFollow
@@ -526,6 +542,32 @@ export async function PATCH(request: NextRequest) {
   if (automationData.openingDmEnabled === false) {
     automationData.openingDmMessage = null;
     automationData.openingDmButtonLabel = null;
+    automationData.openingDmAwaitsReply = false;
+    automationData.openingDmMessages = [];
+  }
+  // Same pairing as the DM variants: the first opening variant doubles as the
+  // single opening message for anything that reads that field alone.
+  if (automationData.openingDmMessages !== undefined) {
+    const list = automationData.openingDmMessages
+      .map((m) => m.trim())
+      .filter(Boolean);
+    automationData.openingDmMessages = list;
+    if (list.length > 0) automationData.openingDmMessage = list[0];
+  }
+  // The update may only touch one of the two, so judge the combination the
+  // campaign will actually end up with.
+  const willAwaitReply =
+    automationData.openingDmAwaitsReply ?? existing.openingDmAwaitsReply;
+  const willRequireFollow =
+    automationData.requireFollow ?? existing.requireFollow;
+  if (willAwaitReply && willRequireFollow) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "A question-first opening cannot also require a follow",
+      },
+      { status: 400 }
+    );
   }
   if (automationData.requireFollow === false) {
     automationData.followPromptMessage = null;
