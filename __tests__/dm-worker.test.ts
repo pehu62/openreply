@@ -71,25 +71,38 @@ vi.mock("@/lib/meta/client", () => ({
   sendDirectMessage: mockSendDirectMessage,
   sendDirectMessageWithLinkButton: mockSendDirectMessageWithLinkButton,
   sendCommentReply: mockSendCommentReply,
-  MetaApiError: class MetaApiError extends Error {
-    code: number;
-    constructor(
-      code: number,
-      _subcode: number | undefined,
-      _fbTraceId: string | undefined,
-      message: string
-    ) {
-      super(message);
-      this.code = code;
-      this.name = "MetaApiError";
+  // The real module has TokenExpiredError and RateLimitError extending
+  // MetaApiError, and the worker branches on `instanceof MetaApiError` to tell
+  // "Meta answered" from "the call never got there". The mock has to keep that
+  // hierarchy or the tests would prove the opposite of what production does.
+  ...(() => {
+    class MetaApiError extends Error {
+      code: number;
+      constructor(
+        code: number,
+        _subcode: number | undefined,
+        _fbTraceId: string | undefined,
+        message: string
+      ) {
+        super(message);
+        this.code = code;
+        this.name = "MetaApiError";
+      }
     }
-  },
-  TokenExpiredError: class TokenExpiredError extends Error {
-    name = "TokenExpiredError";
-  },
-  RateLimitError: class RateLimitError extends Error {
-    name = "RateLimitError";
-  },
+    class TokenExpiredError extends MetaApiError {
+      constructor(message: string, fbTraceId?: string) {
+        super(190, undefined, fbTraceId, message);
+        this.name = "TokenExpiredError";
+      }
+    }
+    class RateLimitError extends MetaApiError {
+      constructor(message: string, fbTraceId?: string) {
+        super(368, undefined, fbTraceId, message);
+        this.name = "RateLimitError";
+      }
+    }
+    return { MetaApiError, TokenExpiredError, RateLimitError };
+  })(),
 }));
 
 vi.mock("@/lib/meta/oauth", () => ({
@@ -138,6 +151,7 @@ vi.mock("bullmq", () => {
   };
 });
 
+import { MetaApiError, RateLimitError } from "@/lib/meta/client";
 import { createDMWorker } from "../lib/queue/dm-worker";
 
 const usagePeriodStart = new Date("2026-05-01T00:00:00.000Z");
@@ -1010,9 +1024,9 @@ describe("DM Worker — one private reply per comment", () => {
     );
 
     const processor = getProcessor();
-    await expect(processor(createMockJob())).rejects.toThrow(
-      "The comment is invalid for a private reply"
-    );
+    // Recorded, not thrown: the refusal is a settled fact about the comment, so
+    // the queue must not ask three more times.
+    await processor(createMockJob());
 
     // A text retry on the same comment would fail identically and overwrite the
     // real reason, so it must not be attempted.
@@ -1416,6 +1430,68 @@ describe("DM Worker — question-first opening", () => {
             instagramAccount: { instagramId: "ig_456" },
           },
         }),
+      })
+    );
+  });
+});
+
+describe("DM Worker — refusals must not become a storm", () => {
+  function metaError(message: string, code = 100) {
+    const err = new Error(message) as Error & { code?: number };
+    err.code = code;
+    return err;
+  }
+
+  it("keeps the hourly slot when Meta refuses the send", async () => {
+    // Meta counts calls attempted, not messages delivered. Handing the slot
+    // back on a refusal removes the only brake on how fast the worker can
+    // attempt, which is what gets the account throttled.
+    mockSendPrivateReply.mockRejectedValue(
+      new MetaApiError(100, undefined, undefined, "The thread owner has archived or deleted this conversation")
+    );
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockReleaseDMSlot).not.toHaveBeenCalled();
+  });
+
+  it("gives the slot back when the failure is on our side of the call", async () => {
+    mockSendPrivateReply.mockRejectedValue(new Error("socket hang up"));
+
+    const processor = getProcessor();
+    await expect(processor(createMockJob())).rejects.toThrow("socket hang up");
+
+    expect(mockReleaseDMSlot).toHaveBeenCalledWith("ig_456");
+  });
+
+  it("does not retry a comment Meta will refuse again", async () => {
+    mockSendPrivateReply.mockRejectedValue(
+      new MetaApiError(100, undefined, undefined, "The requested user cannot be found.")
+    );
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "FAILED" }),
+      })
+    );
+  });
+
+  it("does not retry straight into an active throttle", async () => {
+    mockSendPrivateReply.mockRejectedValue(
+      new RateLimitError("The rate limit has exceeded. Please retry again after some time")
+    );
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockReleaseDMSlot).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "FAILED" }),
       })
     );
   });
