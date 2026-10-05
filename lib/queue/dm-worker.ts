@@ -26,6 +26,7 @@ import {
   sendPrivateReplyWithLinkButton,
 } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
+import { isPermanentSendFailure } from "@/lib/meta/permanent-failures";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 import {
   checkRateLimit,
@@ -795,10 +796,14 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         automation.workspaceId,
         usage.periodStart
       );
-      // The private reply never went out, so the hourly slot it reserved is
-      // handed back — unless Meta itself said "rate limited", in which case
-      // the slot is exactly what was consumed.
-      if (rateLimit.reserved && !(error instanceof RateLimitError)) {
+      // The hourly slot stays spent whenever Meta was actually called, whatever
+      // it answered. Meta throttles on calls attempted, not on messages
+      // delivered, so a budget that only counts successes is not a budget: a
+      // run of refusals would hand every slot straight back and let the worker
+      // attempt as fast as it can loop, which is how an account ends up rate
+      // limited out of the sends that would have worked. Only a failure on our
+      // side of the call returns the slot.
+      if (rateLimit.reserved && !(error instanceof MetaApiError)) {
         try {
           await releaseDMSlot(instagramAccountId);
         } catch {
@@ -806,6 +811,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         }
       }
 
+      const permanent = isPermanentSendFailure(error);
       await prisma.dmLog.update({
         where: {
           automationId_commentId: {
@@ -819,6 +825,19 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           errorMessage: formatError(error),
         },
       });
+
+      // A dead end is recorded, not retried: the queue would ask three more
+      // times and the sweep would bring it back every five minutes, all for
+      // the same refusal. Meta saying "rate limited" is not a dead end, but
+      // retrying it immediately is what sustains the throttle, so that one is
+      // left for a later sweep too.
+      if (permanent || error instanceof RateLimitError) {
+        console.log(
+          `[DM Worker] Not retrying ${commentId}: ${formatError(error)}`
+        );
+        continue;
+      }
+
       throw error;
     }
   }
