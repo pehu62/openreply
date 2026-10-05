@@ -132,6 +132,13 @@ async function handleResponse<T>(response: Response): Promise<T> {
     switch (code) {
       case 190:
         throw new TokenExpiredError(message, traceId);
+      // 613 is the one Instagram actually answers with when the messaging
+      // throttle is on, and it has to be in this list: everywhere else the
+      // worker asks `instanceof RateLimitError` to decide whether to retry,
+      // and a throttle that looks like an ordinary error gets retried as text,
+      // then three more times by the queue, then again by the next sweep —
+      // every one of those a call Meta counts against the same throttle.
+      case 613:
       case 368:
       case 4:
       case 17:
