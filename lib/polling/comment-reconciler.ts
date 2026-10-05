@@ -34,6 +34,7 @@ import {
   type InstagramComment,
 } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
+import { PERMANENT_SEND_FAILURES } from "@/lib/meta/permanent-failures";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 
 // Only consider comments from the last few days — older ones are outside
@@ -235,6 +236,14 @@ async function sweepCampaign(
           { publicReplySentAt: { not: null } },
           { status: "SENT", publicReplyError: null },
           { status: "SKIPPED_DEDUP" },
+          // A refusal that is a settled fact about the comment or the person
+          // counts as finished too. Without this the sweep re-enqueues every
+          // dead comment it can still see, every five minutes, and those
+          // refused calls are what put the account into Meta's throttle.
+          ...PERMANENT_SEND_FAILURES.map((fragment) => ({
+            status: "FAILED" as const,
+            errorMessage: { contains: fragment },
+          })),
         ],
       },
       select: { commentId: true },
